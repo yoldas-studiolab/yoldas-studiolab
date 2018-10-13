@@ -1,44 +1,18 @@
 from flask_sqlalchemy import SQLAlchemy
+from abc import ABCMeta, abstractmethod
+from sqlalchemy import func
 
 
 db = SQLAlchemy()
 
 
 # Base classes
-class BaseArtTag(db.Model):
 
-    code = db.Column(db.String(10), primary_key=True)
-    name = db.Column(db.String(80))
-    desc = db.Column(db.Text, nullable=True)
-
-    def __init__(self, name, code=None):
-
-        self.name = name
-        self.code = code if code else name[:10]
-
-    def __repr__(self):
-        return f'<{self.__class__.__name__} {self.code}>'
-
-    def __str__(self):
-        return self.name
-
-
-class BaseArtMeta(db.Model):
+class BaseArtMeta:
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-
     name = db.Column(db.String(64), nullable=False)
-
     artwork_id = db.Column(db.Integer, db.ForeignKey('artworks.id'))
-    artwork = db.relationship('artworks', backref='metadata')
-
-
-class BasePerson(db.Model):
-
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-
-    name = db.Column(db.String(64), nullable=False)
-    desc = db.Column(db.Text)
 
 
 class CRUDTimeMixin:
@@ -50,11 +24,24 @@ class CRUDTimeMixin:
     )
 
 
+class DBRepr:
+
+    def __repr__(self):
+
+        attrs = [
+            f'{attr}={getattr(self, attr)}'
+            for attr in self.repr_attrs
+            if getattr(self, attr)
+        ]
+
+        return f"<{self.repr_title} {' '.join(attrs)}>"
+
+
 # Many to many tables
 artworks_artmediums_table = db.Table(
     'artworks_artmediums', db.Model.metadata,
     db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
-    db.Column('artmediums_id', db.String, db.ForeignKey('artmediums.code'))
+    db.Column('artmediums_code', db.String, db.ForeignKey('artmediums.code'))
 )
 
 artworks_artists_table = db.Table(
@@ -63,24 +50,82 @@ artworks_artists_table = db.Table(
     db.Column('artist_id', db.Integer, db.ForeignKey('artists.id'))
 )
 
+artworks_artgenres_table = db.Table(
+    'artworks_artgenres', db.Model.metadata,
+    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
+    db.Column('genre_code', db.String, db.ForeignKey('artgenres.code'))
+)
 
 # Database objects
-class ArtMedium(BaseArtTag):
+class BaseArtTag(DBRepr):
+    """Tags are for many-to-many relationships."""
+
+    code = db.Column(db.String(10), primary_key=True)
+    name = db.Column(db.String(80))
+    desc = db.Column(db.Text, nullable=True)
+    repr_attrs = ['code']
+    repr_title = 'BaseArtTag'
+
+    def __init__(self, name, code=None, desc=None):
+
+        self.name = name
+        self.code = code if code else name[:10].replace(' ', '-')
+        if desc:
+            self.desc = desc
+
+    def __str__(self):
+        return self.name
+
+
+class ArtMedium(BaseArtTag, db.Model):
+    """Mediums.
+
+    >>> ArtMedium('oil paint')
+    <ArtMedium code=oil-paint>
+    >>> ArtMedium('pastels', 'past')
+    <ArtMedium code=past>
+    """
 
     __tablename__ = 'artmediums'
+    repr_title = 'ArtMedium'
 
 
-class ArtGenre(BaseArtTag):
+class ArtGenre(BaseArtTag, db.Model):
 
     __tablename__ = 'artgenres'
+    repr_title = 'ArtGenre'
+
+
+class BasePerson(DBRepr):
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+
+    name = db.Column(db.String(64), nullable=False)
+    desc = db.Column(db.Text)
+    repr_attrs = ['name']
+    repr_title = 'BasePerson'
 
 
 class Artist(BasePerson):
 
     __tablename__ = 'artists'
+    repr_title = 'Artist'
+
+
+class Image(CRUDTimeMixin, DBRepr, db.Model):
+    """An image."""
+
+    __tablename__ = 'images'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    path = db.Column(db.String, nullable=False)
+
+    def __init__(self, path):
+        self.path = path
 
 
 class Artwork(CRUDTimeMixin, db.Model):
+    """A single piece of art."""
 
     __tablename__ = 'artworks'
 
@@ -88,23 +133,27 @@ class Artwork(CRUDTimeMixin, db.Model):
     title = db.Column(db.String(100), nullable=False)
     desc = db.Column(db.Text)
 
-    main_img_id = db.Column(db.Integer, db.ForeignKey('artworkimages.id'))
-    main_img = db.relationship('ArtworkImage')
+    main_img_id = db.Column(db.Integer, db.ForeignKey('images.id'))
+    main_img = db.relationship('Image')
 
     mediums = db.relationship(
         'ArtMedium',
-        secondary=artwork_artmedium_table,
+        secondary=artworks_artmediums_table,
         backref='artworks'
     )
     genres = db.relationship(
         'ArtGenre',
-        secondary=artwork_artgenres_table,
+        secondary=artworks_artgenres_table,
         backref='artworks'
     )
     artists = db.relationship(
         'Artist',
-        secondary=artwork_artist_table,
+        secondary=artworks_artists_table,
         backref='artworks'
+    )
+    images = db.relationship(
+        'Image',
+        secondary='artworkimages'
     )
 
     def __init__(self, title, **kwargs):
@@ -114,18 +163,21 @@ class Artwork(CRUDTimeMixin, db.Model):
                 self.__dict__[arg] = val
 
 
-
-class ArtworkInfo(BaseArtworkMeta):
+class ArtworkInfo(BaseArtMeta):
     value = db.Column(db.String(64))
 
 
-class ArtworkImage(ArtworkInfo):
+class ArtworkImage(ArtworkInfo, db.Model):
 
     __tablename__ = 'artworkimages'
 
     title = db.Column(db.String(80))
-    path = db.Column(db.String, nullable=False)
     caption = db.Column(db.Text)
 
-    artwork = db.relationship(Artwork, backref='images')
+    artwork_id = db.Column(db.Integer, db.ForeignKey('artworks.id'))
+    artwork = db.relationship(Artwork)
+
+    image_id = db.Column(db.Integer, db.ForeignKey('images.id'))
+    image = db.relationship(Image)
+
 
