@@ -1,6 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
-from abc import ABCMeta, abstractmethod
-from sqlalchemy import func
+import json
+from datetime import datetime
 
 
 db = SQLAlchemy()
@@ -19,9 +19,35 @@ class CRUDTimeMixin:
     date_created = db.Column(db.Date, nullable=True)
     date_updated = db.Column(
         db.DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now()
+        server_default=db.func.now(),
+        onupdate=db.func.now()
     )
+
+
+class JSONMixin:
+    def to_dict_repr(self):
+
+        public_attrs = {
+            attr: val
+            for attr, val in self.__dict__.items()
+            if not attr.startswith('_')
+        }
+
+        d = {}
+        for attr, val in public_attrs.items():
+            if isinstance(val, db.Model):
+                d[attr] = val.to_dict_repr()
+            elif isinstance(val, list):
+                d[attr] = [
+                    v.to_dict_repr()
+                    for v in val
+                ]
+            elif isinstance(val, datetime):
+                d[attr] = val.isoformat()
+            else:
+                d[attr] = val
+
+        return d
 
 
 class DBRepr:
@@ -36,25 +62,6 @@ class DBRepr:
 
         return f"<{self.repr_title} {' '.join(attrs)}>"
 
-
-# Many to many tables
-artworks_artmediums_table = db.Table(
-    'artworks_artmediums', db.Model.metadata,
-    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
-    db.Column('artmediums_code', db.String, db.ForeignKey('artmediums.code'))
-)
-
-artworks_artists_table = db.Table(
-    'artworks_artists', db.Model.metadata,
-    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
-    db.Column('artist_id', db.Integer, db.ForeignKey('artists.id'))
-)
-
-artworks_artgenres_table = db.Table(
-    'artworks_artgenres', db.Model.metadata,
-    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
-    db.Column('genre_code', db.String, db.ForeignKey('artgenres.code'))
-)
 
 # Database objects
 class BaseArtTag(DBRepr):
@@ -77,7 +84,7 @@ class BaseArtTag(DBRepr):
         return self.name
 
 
-class ArtMedium(BaseArtTag, db.Model):
+class ArtMedium(JSONMixin ,BaseArtTag, db.Model):
     """Mediums.
 
     >>> ArtMedium('oil paint')
@@ -90,7 +97,7 @@ class ArtMedium(BaseArtTag, db.Model):
     repr_title = 'ArtMedium'
 
 
-class ArtGenre(BaseArtTag, db.Model):
+class ArtGenre(JSONMixin, BaseArtTag, db.Model):
 
     __tablename__ = 'artgenres'
     repr_title = 'ArtGenre'
@@ -106,13 +113,13 @@ class BasePerson(DBRepr):
     repr_title = 'BasePerson'
 
 
-class Artist(BasePerson):
+class Artist(BasePerson, db.Model):
 
     __tablename__ = 'artists'
     repr_title = 'Artist'
 
 
-class Image(CRUDTimeMixin, DBRepr, db.Model):
+class Image(JSONMixin, CRUDTimeMixin, DBRepr, db.Model):
     """An image."""
 
     __tablename__ = 'images'
@@ -124,10 +131,12 @@ class Image(CRUDTimeMixin, DBRepr, db.Model):
         self.path = path
 
 
-class Artwork(CRUDTimeMixin, db.Model):
+class Artwork(JSONMixin, CRUDTimeMixin, DBRepr, db.Model):
     """A single piece of art."""
 
     __tablename__ = 'artworks'
+    repr_title = 'Artwork'
+    repr_attrs = ['id', 'title']
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     title = db.Column(db.String(100), nullable=False)
@@ -138,17 +147,17 @@ class Artwork(CRUDTimeMixin, db.Model):
 
     mediums = db.relationship(
         'ArtMedium',
-        secondary=artworks_artmediums_table,
+        secondary='artworks_artmediums',
         backref='artworks'
     )
     genres = db.relationship(
         'ArtGenre',
-        secondary=artworks_artgenres_table,
+        secondary='artworks_artgenres',
         backref='artworks'
     )
     artists = db.relationship(
         'Artist',
-        secondary=artworks_artists_table,
+        secondary='artworks_artists',
         backref='artworks'
     )
     images = db.relationship(
@@ -156,18 +165,39 @@ class Artwork(CRUDTimeMixin, db.Model):
         secondary='artworkimages'
     )
 
+    joins = {'mediums', 'genres', 'artists', 'images',}
+
     def __init__(self, title, **kwargs):
         self.title = title
         for arg, val in kwargs.items():
             if arg in self.__dict__:
                 self.__dict__[arg] = val
 
+    @classmethod
+    def get(cls, key, opts=None):
+        """Get via key"""
+
+        q = cls.query
+        if not opts:
+            opts = cls.joins
+
+        joinedload = [
+            db.joinedload(opt)
+            for opt in opts
+            if opt in cls.joins
+        ]
+
+        q = q.options(*joinedload)
+
+        return q.get(key)
+
+
 
 class ArtworkInfo(BaseArtMeta):
     value = db.Column(db.String(64))
 
 
-class ArtworkImage(ArtworkInfo, db.Model):
+class ArtworkImage(JSONMixin, ArtworkInfo, db.Model):
 
     __tablename__ = 'artworkimages'
 
@@ -180,4 +210,34 @@ class ArtworkImage(ArtworkInfo, db.Model):
     image_id = db.Column(db.Integer, db.ForeignKey('images.id'))
     image = db.relationship(Image)
 
+
+# Many to many tables
+artworks_artmediums_table = db.Table(
+    'artworks_artmediums', db.Model.metadata,
+    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
+    db.Column('artmediums_code', db.String, db.ForeignKey('artmediums.code'))
+)
+
+artworks_artists_table = db.Table(
+    'artworks_artists', db.Model.metadata,
+    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
+    db.Column('artist_id', db.Integer, db.ForeignKey('artists.id'))
+)
+
+artworks_artgenres_table = db.Table(
+    'artworks_artgenres', db.Model.metadata,
+    db.Column('artwork_id', db.Integer, db.ForeignKey('artworks.id')),
+    db.Column('genre_code', db.String, db.ForeignKey('artgenres.code'))
+)
+
+if __name__ == '__main__':
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.debug = True
+    app.secret_key = 'secret'
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql:///yoldasstudiolab'
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    db.app = app
+    db.init_app(app)
 
